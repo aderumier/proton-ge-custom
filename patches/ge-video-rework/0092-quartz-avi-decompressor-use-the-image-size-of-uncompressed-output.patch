@@ -1,0 +1,63 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Alexandre Derumier <aderumier@gmail.com>
+Date: Thu, 08 Oct 2026 21:10:00 +0200
+Subject: [PATCH] quartz: Use the image size of uncompressed output in the AVI
+ decompressor.
+
+The AVI decompressor sets the length of its output samples to the
+biSizeImage of its output format. For uncompressed formats that field may
+be 0, and after a dynamic format change it can be stale: Raiden III
+(NESiCAxLive) plays uncompressed RGB24 AVIs through amstream, the output
+switches to RGB32 on the first frame but keeps the RGB24 size (230400
+instead of 307200). The Color Space Converter then rejects every sample
+after the first one (E_INVALIDARG, short sample): the movie froze on its
+first frame.
+
+Compute the image size from the format for BI_RGB and BI_BITFIELDS
+outputs.
+---
+diff --git a/dlls/quartz/avidec.c b/dlls/quartz/avidec.c
+--- a/dlls/quartz/avidec.c
++++ b/dlls/quartz/avidec.c
+@@ -237,7 +237,7 @@
+     LPBYTE pbSrcStream;
+     LONGLONG tStart, tStop;
+     AM_MEDIA_TYPE *mt;
+-    DWORD flags = 0;
++    DWORD flags = 0, image_size;
+     LRESULT res;
+ 
+     /* We do not expect pin connection state to change while the filter is
+@@ -320,10 +320,18 @@
+         IMediaSample_Release(pOutSample);
+         return hr;
+     }
++    /* For uncompressed formats, biSizeImage may be 0, or stale after a dynamic
++     * format change (an RGB32 type carrying the RGB24 size): use the image size. */
++    image_size = This->output_format->biSizeImage;
++    if (This->output_format->biCompression == BI_RGB
++            || This->output_format->biCompression == BI_BITFIELDS)
++        image_size = ((This->output_format->biWidth * This->output_format->biBitCount + 31) / 32 * 4)
++                * abs(This->output_format->biHeight);
++
+     cbDstStream = IMediaSample_GetSize(pOutSample);
+-    if (cbDstStream < This->output_format->biSizeImage)
++    if (cbDstStream < image_size)
+     {
+-        ERR("Sample size is too small (%ld < %lu).\n", cbDstStream, This->output_format->biSizeImage);
++        ERR("Sample size is too small (%ld < %lu).\n", cbDstStream, image_size);
+         IMediaSample_Release(pOutSample);
+         return E_FAIL;
+     }
+@@ -361,7 +369,7 @@
+         return S_OK;
+     }
+ 
+-    IMediaSample_SetActualDataLength(pOutSample, This->output_format->biSizeImage);
++    IMediaSample_SetActualDataLength(pOutSample, image_size);
+ 
+     IMediaSample_SetPreroll(pOutSample, (IMediaSample_IsPreroll(pSample) == S_OK));
+     IMediaSample_SetDiscontinuity(pOutSample, (IMediaSample_IsDiscontinuity(pSample) == S_OK));
+-- 
+2.55.0
+
